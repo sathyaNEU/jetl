@@ -5,13 +5,15 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import uuid
 import logging
+import csv
+import io
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from utils.s3.core import upload_to_s3
+from utils.s3.core import upload_csv_to_s3, send_job_completion_notification
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -120,9 +122,9 @@ def scrape_linkedin_job(url):
         selectors = ['.top-card-layout__title', 'h1.topcard__title']
         job_data['title'] = extract_text(soup, selectors, "Not found")
         
-        # Extract company name
-        selectors = ['.topcard__org-name-link', '.topcard__org-name', '.top-card-layout__card .topcard__flavor-row span:not(.location)']
-        job_data['company'] = extract_text(soup, selectors, "Not found")
+        # COMMENTED OUT: Extract company name (not needed in CSV)
+        # selectors = ['.topcard__org-name-link', '.topcard__org-name', '.top-card-layout__card .topcard__flavor-row span:not(.location)']
+        # job_data['company'] = extract_text(soup, selectors, "Not found")
         
         # Extract location
         selectors = ['.topcard__flavor--bullet', '.top-card-layout__card .topcard__flavor-row .location', '.topcard__subline-location']
@@ -133,9 +135,9 @@ def scrape_linkedin_job(url):
         posted_text = extract_text(soup, selectors, None)
         job_data['posted_date'] = parse_posted_date(posted_text) if posted_text else None
         
-        # Extract job description
-        selectors = ['.description__text', '.show-more-less-html__markup', 'div[class*="description"]']
-        job_data['description'] = extract_text(soup, selectors, "Not found")
+        # COMMENTED OUT: Extract job description (not needed in CSV)
+        # selectors = ['.description__text', '.show-more-less-html__markup', 'div[class*="description"]']
+        # job_data['description'] = extract_text(soup, selectors, "Not found")
         
         # Extract job criteria
         criteria_section = soup.select('.description__job-criteria-item')
@@ -147,10 +149,10 @@ def scrape_linkedin_job(url):
             except:
                 continue
         
-        # Extract number of applicants
-        selectors = ['.num-applicants__caption', 'span[class*="applicant"]']
-        applicants_text = extract_text(soup, selectors, "Not found")
-        job_data['applicants'] = applicants_text.replace("applicants", "").strip() if applicants_text != "Not found" else "Not found"
+        # COMMENTED OUT: Extract number of applicants (not needed in CSV)
+        # selectors = ['.num-applicants__caption', 'span[class*="applicant"]']
+        # applicants_text = extract_text(soup, selectors, "Not found")
+        # job_data['applicants'] = applicants_text.replace("applicants", "").strip() if applicants_text != "Not found" else "Not found"
         
         return job_data
     
@@ -163,8 +165,65 @@ def scrape_linkedin_job(url):
             driver.quit()
 
 
+def create_csv_from_jobs(jobs_data):
+    """Convert list of job dictionaries to CSV string"""
+    if not jobs_data:
+        return ""
+    
+    # Define only the columns we need
+    fieldnames = [
+        'employment_type',
+        'industries', 
+        'location',
+        'posted_date',
+        'seniority_level',
+        'title',
+        'url'
+    ]
+    
+    # COMMENTED OUT: Get all unique fieldnames from all job records (old dynamic approach)
+    # fieldnames = set()
+    # for job in jobs_data:
+    #     fieldnames.update(job.keys())
+    # 
+    # COMMENTED OUT: Sort fieldnames for consistent column order (old dynamic approach)
+    # fieldnames = sorted(list(fieldnames))
+    
+    # Create CSV in memory
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    
+    # Write header
+    writer.writeheader()
+    
+    # Write job data
+    for job in jobs_data:
+        # Ensure all fields are present (fill missing with empty string)
+        row = {field: job.get(field, '') for field in fieldnames}
+        writer.writerow(row)
+    
+    csv_content = output.getvalue()
+    output.close()
+    
+    return csv_content
+
+
+def upload_csv(csv_content, s3_key):
+    """Upload CSV content to S3"""
+    try:
+        # Convert string to bytes for S3 upload
+        csv_bytes = csv_content.encode('utf-8')
+        return upload_csv_to_s3(csv_bytes, s3_key)
+    except Exception as e:
+        logging.error(f"Error uploading CSV to S3: {e}")
+        return False
+
+
 def get_job_information(**context):
-    """Main function to scrape jobs and upload to S3"""
+    """Main function to scrape jobs and upload to S3 as CSV"""
+    # Capture job start time
+    job_start_time = now.strftime('%Y-%m-%d %H:%M:%S')
+    
     try:
         ti = context['ti']
         task_id = context['task'].task_id
@@ -177,7 +236,9 @@ def get_job_information(**context):
             logging.warning(f"No links found for role: {role_name}")
             return {"status_code": 404, "message": "No jobs found"}
         
-        successful_uploads = 0
+        # List to store all job data for CSV creation
+        all_jobs_data = []
+        successful_scrapes = 0
         
         for i, link in enumerate(links):
             job_uuid = str(uuid.uuid4())
@@ -202,22 +263,80 @@ def get_job_information(**context):
                 logging.info(f"Skipping staffing/recruiting job: {job_data.get('title', 'Unknown')}")
                 continue
             
-            job_data['role'] = job_role
-            job_data['url'] = job_url
+            # Add metadata to job data (COMMENTED OUT unnecessary fields)
+            # job_data['role'] = job_role
+            job_data['url'] = job_url  # Keep URL as it's needed
+            # job_data['job_uuid'] = job_uuid
+            # job_data['scraped_at'] = now.strftime('%Y-%m-%d %H:%M:%S')
             
-            # Upload to S3
-            s3_key = f"jobs/{current_year}/{current_month}/{current_day}/{current_hour}/{job_role}/{job_uuid}/job_{job_uuid}.json"
-            if upload_to_s3(job_data, s3_key):
-                successful_uploads += 1
+            # Add to our collection
+            all_jobs_data.append(job_data)
+            successful_scrapes += 1
             
             # Add delay between requests
             if i < len(links) - 1:
                 time.sleep(random.uniform(3, 8))
         
-        return {
-            "status_code": 200,
-            "message": f"Successfully uploaded {successful_uploads}/{len(links)} jobs to S3"
-        }
+        # COMMENTED OUT: Original JSON upload logic
+        # This was the original approach that uploaded each job as a separate JSON file
+        """
+        # Original JSON upload logic (COMMENTED OUT)
+        for i, link in enumerate(links):
+            job_uuid = str(uuid.uuid4())
+            job_url = link.get('url')
+            job_role = link.get('role', '').replace(" ", "_").lower()
+            
+            # ... scraping logic ...
+            
+            job_data['role'] = job_role
+            job_data['url'] = job_url
+            
+            # Upload individual JSON to S3
+            s3_key = f"jobs/{current_year}/{current_month}/{current_day}/{current_hour}/{job_role}/{job_uuid}/job_{job_uuid}.json"
+            if upload_to_s3(job_data, s3_key):
+                successful_uploads += 1
+        """
+        
+        # NEW CSV APPROACH: Create and upload single CSV file
+        if all_jobs_data:
+            # Generate CSV content
+            csv_content = create_csv_from_jobs(all_jobs_data)
+            
+            # Create S3 key for single CSV file
+            timestamp = now.strftime('%Y%m%d_%H%M%S')
+            s3_key = f"jobs/{current_year}/{current_month}/{current_day}/{current_hour}/{role_name}_{timestamp}.csv"
+            
+            # Upload CSV to S3
+            if upload_csv(csv_content, s3_key):
+                logging.info(f"Successfully uploaded CSV with {len(all_jobs_data)} jobs to S3: {s3_key}")
+                
+                # Send SNS notification
+                notification_sent = send_job_completion_notification(
+                    s3_key=s3_key,
+                    job_start_time=job_start_time,
+                    role_name=role_name,
+                    jobs_count=len(all_jobs_data)
+                )
+                
+                return {
+                    "status_code": 200,
+                    "message": f"Successfully scraped {successful_scrapes} jobs and uploaded CSV to S3",
+                    "csv_file": s3_key,
+                    "jobs_count": len(all_jobs_data),
+                    "notification_sent": notification_sent
+                }
+            else:
+                logging.error("Failed to upload CSV to S3")
+                return {
+                    "status_code": 500,
+                    "message": f"Scraped {successful_scrapes} jobs but failed to upload CSV to S3"
+                }
+        else:
+            logging.warning("No valid job data to upload")
+            return {
+                "status_code": 404,
+                "message": "No valid jobs found to upload"
+            }
     
     except Exception as e:
         logging.error(f"Unexpected error: {e}", exc_info=True)
