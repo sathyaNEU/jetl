@@ -1,0 +1,11 @@
+.venv
+prototype
+**/.env
+**/__pycache__
+airflow/dags/logs
+airflow/logs
+prototyping
+airflow/logs
+*.txt
+*.ipynb
+
