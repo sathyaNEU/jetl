@@ -12,7 +12,7 @@ with DAG(
     dag_id="job_scrapper",
     description="dag for scraping job links and job deatils",
     start_date=datetime(2025, 12, 17),
-    schedule_interval="*/15 * * * *",
+    schedule_interval="*/20 * * * *",
     catchup=False
 
 ) as dag :
@@ -26,7 +26,7 @@ with DAG(
         params={
             "job_roles" : roles,
             "options" :{
-                "time_posted": 1200,  
+                "time_posted": 1500,  
                 "location": "United States"
              }
         }

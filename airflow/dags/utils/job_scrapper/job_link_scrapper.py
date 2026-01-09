@@ -171,11 +171,12 @@ def scrape_linkedin_jobs(**context):
                 # Find all <a> tags and extract links
                 links = [a.get("href") for a in soup.find_all("a", href=True)]
                 
-                # Filter for job links
                 filtered_links = []
+
                 for link in links:
-                    if '/jobs/' in link and '?position=' in link and '&trackingId=' in link:
-                        filtered_links.append(link)
+                    if '/jobs/view/' in link:
+                        clean_link = link.split('?', 1)[0]
+                        filtered_links.append(clean_link)
                 
                 # Remove duplicates within this role
                 unique_links = list(set(filtered_links))
